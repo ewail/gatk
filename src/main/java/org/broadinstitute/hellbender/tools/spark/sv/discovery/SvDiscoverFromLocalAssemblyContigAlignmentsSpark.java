@@ -140,7 +140,7 @@ public final class SvDiscoverFromLocalAssemblyContigAlignmentsSpark extends GATK
         final String outputPrefixWithSampleName = outputPrefix + SVUtils.getSampleId(getHeaderForReads()) + "_";
         final SvDiscoveryInputData svDiscoveryInputData =
                 new SvDiscoveryInputData(ctx, discoverStageArgs, outputPrefixWithSampleName,
-                        null, null, null,
+                        null, null, null, null,
                         cnvCallsBroadcast,
                         getReads(), getHeaderForReads(), getReference(), localLogger);
 

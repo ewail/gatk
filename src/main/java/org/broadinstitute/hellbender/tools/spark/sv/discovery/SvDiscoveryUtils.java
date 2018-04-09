@@ -8,6 +8,7 @@ import org.broadinstitute.hellbender.exceptions.UserException;
 import org.broadinstitute.hellbender.tools.spark.sv.StructuralVariationDiscoveryArgumentCollection.DiscoverVariantsFromContigsAlignmentsSparkArgumentCollection;
 import org.broadinstitute.hellbender.tools.spark.sv.discovery.inference.BreakpointComplications;
 import org.broadinstitute.hellbender.tools.spark.sv.discovery.inference.NovelAdjacencyAndAltHaplotype;
+import org.broadinstitute.hellbender.tools.spark.sv.evidence.AlignedAssemblyOrExcuse;
 import org.broadinstitute.hellbender.tools.spark.sv.utils.SVFileUtils;
 import org.broadinstitute.hellbender.tools.spark.sv.utils.SVInterval;
 import org.broadinstitute.hellbender.tools.spark.sv.utils.SVIntervalTree;
@@ -28,7 +29,7 @@ public class SvDiscoveryUtils {
 
 
 
-    public static void evaluateIntervalsAndNarls(final List<SVInterval> assembledIntervals,
+    public static void evaluateIntervalsAndNarls(final SvDiscoveryInputData inputData,
                                                  final List<NovelAdjacencyAndAltHaplotype> narls,
                                                  final SAMSequenceDictionary referenceSequenceDictionary,
                                                  final DiscoverVariantsFromContigsAlignmentsSparkArgumentCollection parameters,
@@ -37,14 +38,25 @@ public class SvDiscoveryUtils {
             final SVIntervalTree<String> trueBreakpoints =
                     SVVCFReader.readBreakpointsFromTruthVCF(parameters.truthVCF, referenceSequenceDictionary, parameters.truthIntervalPadding);
 
-            if ( assembledIntervals != null ) {
-                evaluateIntervalsAgainstTruth(assembledIntervals, trueBreakpoints, toolLogger);
-            }
-
             final SVIntervalTree<String> narlyBreakpoints =
                     readBreakpointsFromNarls(narls, referenceSequenceDictionary, parameters.truthIntervalPadding);
 
+            if ( inputData.assembledIntervals != null ) {
+                evaluateIntervalsAgainstTruth(inputData.assembledIntervals, trueBreakpoints, toolLogger);
+
+                if ( parameters.intervalFile != null && inputData.intervalAssemblies != null ) {
+                    AlignedAssemblyOrExcuse.writeIntervalFile(
+                            parameters.intervalFile,
+                            inputData.headerBroadcast.getValue(),
+                            inputData.assembledIntervals,
+                            inputData.intervalAssemblies,
+                            trueBreakpoints,
+                            narlyBreakpoints );
+                }
+            }
+
             evaluateNarlsAgainstTruth(narlyBreakpoints, trueBreakpoints, toolLogger);
+
         }
     }
 

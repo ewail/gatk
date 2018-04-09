@@ -4,6 +4,7 @@ import com.google.common.annotations.VisibleForTesting;
 import htsjdk.samtools.util.SequenceUtil;
 import org.broadinstitute.hellbender.exceptions.GATKException;
 import org.broadinstitute.hellbender.tools.spark.sv.utils.*;
+import org.broadinstitute.hellbender.tools.spark.sv.utils.SVFastqUtils.FastqRead;
 import org.broadinstitute.hellbender.tools.spark.utils.HopscotchMultiMap;
 import org.broadinstitute.hellbender.utils.BaseUtils;
 import org.broadinstitute.hellbender.utils.bwa.BwaMemAligner;
@@ -22,6 +23,7 @@ import java.util.*;
 /** LocalAssemblyHandler that uses FermiLite. */
 public final class FermiLiteAssemblyHandler implements FindBreakpointEvidenceSpark.LocalAssemblyHandler {
     private static final long serialVersionUID = 1L;
+    private static final int assemblyKmerSize = 31;
     private final String alignerIndexFile;
     private final int maxFastqSize;
     private final String fastqDir;
@@ -49,13 +51,13 @@ public final class FermiLiteAssemblyHandler implements FindBreakpointEvidenceSpa
      *  assembler to stitch together valid paths through the contigs.
      *  These paths are then aligned to reference with BWA. */
     @Override
-    public AlignedAssemblyOrExcuse apply( final Tuple2<Integer, List<SVFastqUtils.FastqRead>> intervalAndReads ) {
+    public AlignedAssemblyOrExcuse apply( final Tuple2<Integer, List<FastqRead>> intervalAndReads ) {
         final int intervalID = intervalAndReads._1();
         final String assemblyName = AlignedAssemblyOrExcuse.formatAssemblyID(intervalID);
-        final List<SVFastqUtils.FastqRead> readsList = intervalAndReads._2();
+        final List<FastqRead> readsList = intervalAndReads._2();
 
         // bail if the assembly will be too large
-        final int fastqSize = readsList.stream().mapToInt(FastqRead -> FastqRead.getBases().length).sum();
+        final int fastqSize = readsList.stream().mapToInt(fastqRead -> fastqRead.getBases().length).sum();
         if ( fastqSize > maxFastqSize ) {
             return new AlignedAssemblyOrExcuse(intervalID, "no assembly -- too big (" + fastqSize + " bytes).");
         }
@@ -63,8 +65,8 @@ public final class FermiLiteAssemblyHandler implements FindBreakpointEvidenceSpa
         // record the reads in the assembly as a FASTQ, if requested
         if ( fastqDir != null ) {
             final String fastqName = String.format("%s/%s.fastq", fastqDir, assemblyName);
-            final ArrayList<SVFastqUtils.FastqRead> sortedReads = new ArrayList<>(readsList);
-            sortedReads.sort(Comparator.comparing(SVFastqUtils.FastqRead::getHeader));
+            final ArrayList<FastqRead> sortedReads = new ArrayList<>(readsList);
+            sortedReads.sort(Comparator.comparing(FastqRead::getHeader));
             SVFastqUtils.writeFastqFile(fastqName, sortedReads.iterator());
         }
 
@@ -87,6 +89,13 @@ public final class FermiLiteAssemblyHandler implements FindBreakpointEvidenceSpa
         // patch up the assembly to improve contiguity
         final FermiLiteAssembly assembly = reviseAssembly(initialAssembly, removeShadowedContigs, expandAssemblyGraph);
 
+        // align reads to assembly
+        List<List<UngappedAlignment>> allAlignments = alignReads(assembly, readsList);
+        //TODO: write the alignments as a SAM file, if requested
+        final float assemblyScore = scoreAssembly(readsList, allAlignments);
+
+        final int readBases = readsList.stream().mapToInt(read -> read.getBases().length).sum();
+
         // record the assembly as a GFA, if requested
         if ( fastqDir != null && writeGFAs ) {
             final String gfaName =  String.format("%s/%s.gfa", fastqDir, assemblyName);
@@ -107,7 +116,7 @@ public final class FermiLiteAssemblyHandler implements FindBreakpointEvidenceSpa
                             .map(Contig::getSequence)
                             .collect(SVUtils.arrayListCollector(assembly.getNContigs()));
             final List<List<BwaMemAlignment>> alignments = aligner.alignSeqs(sequences);
-            return new AlignedAssemblyOrExcuse(intervalID, assembly, secondsInAssembly, alignments);
+            return new AlignedAssemblyOrExcuse(intervalID, assembly, secondsInAssembly, assemblyScore, readBases, alignments);
         }
     }
 
@@ -123,22 +132,10 @@ public final class FermiLiteAssemblyHandler implements FindBreakpointEvidenceSpa
     /** Eliminate contigs from the assembly that vary from another contig by just a few SNVs. */
     @VisibleForTesting
     static FermiLiteAssembly removeShadowedContigs( final FermiLiteAssembly assembly ) {
-        final int kmerSize = 31;
         final double maxMismatchRate = .01;
 
         // make a map of assembled kmers
-        final int capacity = assembly.getContigs().stream().mapToInt(tig -> tig.getSequence().length - kmerSize + 1).sum();
-        final HopscotchMultiMap<SVKmerShort, ContigLocation, KmerLocation> kmerMap = new HopscotchMultiMap<>(capacity);
-        assembly.getContigs().forEach(tig -> {
-            int contigOffset = 0;
-            final Iterator<SVKmer> contigKmerItr = new SVKmerizer(tig.getSequence(), kmerSize, new SVKmerShort());
-            while ( contigKmerItr.hasNext() ) {
-                final SVKmerShort kmer = (SVKmerShort)contigKmerItr.next();
-                final SVKmerShort canonicalKmer = kmer.canonical(kmerSize);
-                final ContigLocation location = new ContigLocation(tig, contigOffset++, kmer.equals(canonicalKmer));
-                kmerMap.add(new KmerLocation(canonicalKmer, location));
-            }
-        });
+        final HopscotchMultiMap<SVKmerShort, ContigLocation, KmerLocation> kmerMap = kmerizeAssembly(assembly);
 
         /* Remove contigs that vary by a small number of SNVs from another contig. E.g.,
          *  <-------contigA----------->
@@ -153,22 +150,24 @@ public final class FermiLiteAssemblyHandler implements FindBreakpointEvidenceSpa
             final byte[] tigBases = tig.getSequence();
             final int maxMismatches = (int)(tigBases.length * maxMismatchRate);
             int tigOffset = 0;
-            final SVKmerizer contigKmerItr = new SVKmerizer(tig.getSequence(), kmerSize, new SVKmerShort(kmerSize));
+            final SVKmerizer contigKmerItr =
+                    new SVKmerizer(tig.getSequence(), assemblyKmerSize, new SVKmerShort(assemblyKmerSize));
             while ( contigKmerItr.hasNext() ) {
                 final SVKmerShort contigKmer = (SVKmerShort)contigKmerItr.next();
-                final SVKmerShort canonicalContigKmer = contigKmer.canonical(kmerSize);
+                final SVKmerShort canonicalContigKmer = contigKmer.canonical(assemblyKmerSize);
                 final boolean contigKmerIsCanonical = contigKmer.equals(canonicalContigKmer);
                 final Iterator<KmerLocation> locItr = kmerMap.findEach(canonicalContigKmer);
                 while ( locItr.hasNext() ) {
                     final ContigLocation tig2Location = locItr.next().getLocation();
                     final Contig tig2 = tig2Location.getContig();
                     if ( tig == tig2 || contigsToRemove.contains(tig2) ) continue;
+                    //TODO: rewrite some of these calculations using ContigLocation methods rc(), upstream(), etc.
                     // having found a kmer that matches between two contigs, and knowing the offsets of those kmers, we'll
                     // figure out the regions of the two contigs that overlap if the shared kmer implies a valid identity
                     final byte[] tig2Bases = tig2.getSequence();
                     final boolean isRC = contigKmerIsCanonical != tig2Location.isCanonical();
                     final int tig2Offset =
-                            isRC ? tig2Bases.length - tig2Location.getOffset() - kmerSize : tig2Location.getOffset();
+                            isRC ? tig2Bases.length - tig2Location.getOffset() - assemblyKmerSize : tig2Location.getOffset();
                     // if the number of bases upstream of the matching kmer is greater for tig than for tig2, then
                     // tig2 doesn't completely cover tig and so can't shadow it
                     if ( tigOffset > tig2Offset ) continue;
@@ -228,6 +227,26 @@ public final class FermiLiteAssemblyHandler implements FindBreakpointEvidenceSpa
         });
 
         return new FermiLiteAssembly(contigList);
+    }
+
+    /** make a map of assembled kmers */
+    private static HopscotchMultiMap<SVKmerShort, ContigLocation, KmerLocation> kmerizeAssembly(
+                    final FermiLiteAssembly assembly ) {
+        final int capacity =
+                assembly.getContigs().stream().mapToInt(tig -> tig.getSequence().length - assemblyKmerSize + 1).sum();
+        final HopscotchMultiMap<SVKmerShort, ContigLocation, KmerLocation> kmerMap = new HopscotchMultiMap<>(capacity);
+        assembly.getContigs().forEach(tig -> {
+            int contigOffset = 0;
+            final Iterator<SVKmer> contigKmerItr =
+                    new SVKmerizer(tig.getSequence(), assemblyKmerSize, new SVKmerShort());
+            while ( contigKmerItr.hasNext() ) {
+                final SVKmerShort kmer = (SVKmerShort)contigKmerItr.next();
+                final SVKmerShort canonicalKmer = kmer.canonical(assemblyKmerSize);
+                final ContigLocation location = new ContigLocation(tig, contigOffset++, kmer.equals(canonicalKmer));
+                kmerMap.add(new KmerLocation(canonicalKmer, location));
+            }
+        });
+        return kmerMap;
     }
 
     // join contigs that connect without any other branches
@@ -476,6 +495,14 @@ public final class FermiLiteAssemblyHandler implements FindBreakpointEvidenceSpa
         public int getOffset() { return offset; }
         public boolean isCanonical() { return canonical; }
 
+        public ContigLocation upstream( final int distance ) {
+            return new ContigLocation(contig, offset - distance, canonical);
+        }
+
+        public ContigLocation rc() {
+            return new ContigLocation(contig, contig.getSequence().length - offset - 1, !canonical);
+        }
+
         @Override public boolean equals( final Object obj ) {
             return obj instanceof ContigLocation && equals((ContigLocation)obj);
         }
@@ -536,5 +563,125 @@ public final class FermiLiteAssemblyHandler implements FindBreakpointEvidenceSpa
         @Override public int hashCode() {
             return isRC ? -contig.hashCode() : contig.hashCode();
         }
+    }
+
+    private static float scoreAssembly( final List<FastqRead> readsList,
+                                        final List<List<UngappedAlignment>> allAlignments ) {
+        long penaltySum = 0;
+        long baseCount = 0;
+        for ( int idx = 0; idx != readsList.size(); ++idx ) {
+            final FastqRead read = readsList.get(idx);
+            final List<UngappedAlignment> readAlignments = allAlignments.get(idx);
+            if ( readAlignments.isEmpty() ) {
+                for ( byte qual : read.getQuals() ) {
+                    penaltySum += qual;
+                }
+            } else {
+                penaltySum += readAlignments.get(0).getUnmatchedQualityPenalty();
+            }
+            baseCount += read.getQuals().length;
+        }
+        return (float)penaltySum / baseCount;
+    }
+
+    private List<List<UngappedAlignment>> alignReads( final FermiLiteAssembly assembly, final List<FastqRead> reads ) {
+        HopscotchMultiMap<SVKmerShort, ContigLocation, KmerLocation> kmerMap = kmerizeAssembly(assembly);
+        final List<List<UngappedAlignment>> allAlignments = new ArrayList<>(reads.size());
+        for ( final FastqRead read : reads ) {
+            final List<UngappedAlignment> alignments = new ArrayList<>();
+            allAlignments.add(alignments);
+            final Map<ContigLocation, UngappedAlignment> alignmentMap = new HashMap<>();
+            int readOffset = 0;
+            SVKmerizer readKmerIter =
+                    new SVKmerizer(read.getBases(), assemblyKmerSize, new SVKmerShort(assemblyKmerSize));
+            while ( readKmerIter.hasNext() ) {
+                final SVKmerShort readKmer = (SVKmerShort)readKmerIter.next();
+                final SVKmerShort canonicalReadKmer = readKmer.canonical(assemblyKmerSize);
+                final boolean readKmerIsCanonical = readKmer.equals(canonicalReadKmer);
+                final Iterator<KmerLocation> kmerLocationIterator = kmerMap.findEach(canonicalReadKmer);
+                while ( kmerLocationIterator.hasNext() ) {
+                    final KmerLocation kmerLocation = kmerLocationIterator.next();
+                    final ContigLocation contigLocation = kmerLocation.getLocation();
+                    final Contig contig = contigLocation.getContig();
+                    // the contig location corresponding to the start of the read -- NB: may have a negative offset
+                    final ContigLocation startingLocation =
+                        readKmerIsCanonical == contigLocation.isCanonical() ?
+                                contigLocation.upstream(readOffset) :
+                                contigLocation.rc().upstream(readOffset + assemblyKmerSize - 1);
+                    if ( alignmentMap.containsKey(startingLocation) ) continue;
+                    final int unmatchedQualityPenalty = scoreAlignment(read, startingLocation);
+                    final UngappedAlignment ungappedAlignment;
+                    if ( startingLocation.getOffset() < 0 ) {
+                        final ContigLocation adjustedLocation =
+                                new ContigLocation(contig, 0, startingLocation.isCanonical());
+                        final int readStart = -startingLocation.getOffset();
+                        ungappedAlignment =
+                                new UngappedAlignment(adjustedLocation,
+                                            readStart,
+                                            Math.min(read.getBases().length - readStart, contig.getSequence().length),
+                                            unmatchedQualityPenalty);
+                    } else {
+                        final int alignmentLength =
+                                Math.min(read.getBases().length, contig.getSequence().length - startingLocation.getOffset());
+                        ungappedAlignment =
+                                new UngappedAlignment(startingLocation, 0, alignmentLength, unmatchedQualityPenalty);
+                    }
+                    alignmentMap.put(startingLocation, ungappedAlignment);
+                    readOffset += 1;
+                }
+            }
+            final int minPenalty =
+                    alignmentMap.values().stream()
+                            .mapToInt(UngappedAlignment::getUnmatchedQualityPenalty).min().orElse(0);
+            alignmentMap.values().stream()
+                    .filter(aln -> aln.getUnmatchedQualityPenalty() == minPenalty).forEach(alignments::add);
+        }
+        return allAlignments;
+    }
+
+    private static int scoreAlignment( final FastqRead read, final ContigLocation startingLocation ) {
+        final byte[] readBases = read.getBases();
+        final byte[] readQuals = read.getQuals();
+        final byte[] contigBases = startingLocation.getContig().getSequence();
+        int unmatchedQualitySum = 0;
+        if ( startingLocation.isCanonical() ) {
+            int contigIndex = startingLocation.getOffset();
+            for ( int readIndex = 0; readIndex != readBases.length; ++readIndex, ++contigIndex ) {
+                if ( contigIndex < 0 || contigIndex >= contigBases.length ||
+                        readBases[readIndex] != contigBases[contigIndex] ) {
+                    unmatchedQualitySum += readQuals[readIndex];
+                }
+            }
+        } else {
+            int contigIndex = contigBases.length - startingLocation.getOffset() - 1;
+            for ( int readIndex = 0; readIndex != readBases.length; ++readIndex, --contigIndex ) {
+                if ( contigIndex < 0 || contigIndex >= contigBases.length ||
+                        readBases[readIndex] != BaseUtils.simpleComplement(contigBases[contigIndex]) ) {
+                    unmatchedQualitySum += readQuals[readIndex];
+                }
+            }
+        }
+        return unmatchedQualitySum;
+    }
+
+    private static final class UngappedAlignment {
+        private final ContigLocation contigLocation;
+        private final int readOffset;
+        private final int alignedLength;
+        private final int unmatchedQualityPenalty;
+
+        public UngappedAlignment( final ContigLocation contigLocation,
+                                  final int readOffset, final int alignedLength,
+                                  final int unmatchedQualityPenalty) {
+            this.contigLocation = contigLocation;
+            this.readOffset = readOffset;
+            this.alignedLength = alignedLength;
+            this.unmatchedQualityPenalty = unmatchedQualityPenalty;
+        }
+
+        public ContigLocation getContigLocation() { return contigLocation; }
+        public int getReadOffset() { return readOffset; }
+        public int getAlignedLength() { return alignedLength; }
+        public int getUnmatchedQualityPenalty() { return unmatchedQualityPenalty; }
     }
 }

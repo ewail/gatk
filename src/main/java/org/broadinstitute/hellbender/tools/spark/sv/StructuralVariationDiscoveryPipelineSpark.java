@@ -209,6 +209,7 @@ public class StructuralVariationDiscoveryPipelineSpark extends GATKSparkTool {
 
         return new SvDiscoveryInputData(ctx, discoverStageArgs, outputPrefixWithSampleName,
                 assembledEvidenceResults.getReadMetadata(), assembledEvidenceResults.getAssembledIntervals(),
+                assembledEvidenceResults.getAlignedAssemblyOrExcuseList(),
                 makeEvidenceLinkTree(assembledEvidenceResults.getEvidenceTargetLinks()),
                 cnvCallsBroadcast,
                 getReads(), getHeaderForReads(), getReference(), localLogger);
@@ -289,6 +290,7 @@ public class StructuralVariationDiscoveryPipelineSpark extends GATKSparkTool {
                 new SvDiscoveryInputData(sampleId, svDiscoveryInputData.discoverStageArgs,
                         svDiscoveryInputData.outputPath + "experimentalInterpretation_",
                         svDiscoveryInputData.metadata, svDiscoveryInputData.assembledIntervals,
+                        svDiscoveryInputData.intervalAssemblies,
                         svDiscoveryInputData.evidenceTargetLinks, reads, svDiscoveryInputData.toolLogger,
                         referenceBroadcast, referenceSequenceDictionaryBroadcast, headerBroadcast, cnvCallsBroadcast);
 

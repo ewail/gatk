@@ -5,9 +5,12 @@ import com.esotericsoftware.kryo.Kryo;
 import com.esotericsoftware.kryo.io.Input;
 import com.esotericsoftware.kryo.io.Output;
 import htsjdk.samtools.*;
+import org.broadinstitute.hellbender.exceptions.GATKException;
 import org.broadinstitute.hellbender.exceptions.UserException;
+import org.broadinstitute.hellbender.tools.spark.sv.discovery.alignment.AlignedAssembly;
 import org.broadinstitute.hellbender.tools.spark.sv.utils.SVFileUtils;
 import org.broadinstitute.hellbender.tools.spark.sv.utils.SVInterval;
+import org.broadinstitute.hellbender.tools.spark.sv.utils.SVIntervalTree;
 import org.broadinstitute.hellbender.tools.spark.sv.utils.SVUtils;
 import org.broadinstitute.hellbender.utils.SequenceDictionaryUtils;
 import org.broadinstitute.hellbender.utils.Utils;
@@ -21,10 +24,7 @@ import org.broadinstitute.hellbender.utils.gcs.BucketUtils;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -38,8 +38,12 @@ public final class AlignedAssemblyOrExcuse {
     private final FermiLiteAssembly assembly;
     private final List<List<BwaMemAlignment>> contigAlignments;
     private final int secondsInAssembly;
+    private final float assemblyScore;
+    private final int readBases;
 
     public int getSecondsInAssembly() { return secondsInAssembly; }
+    public float getAssemblyScore() { return assemblyScore; }
+    public int getReadBases() { return readBases; }
 
     public int getAssemblyId() {
         return assemblyId;
@@ -73,9 +77,13 @@ public final class AlignedAssemblyOrExcuse {
         this.assembly = null;
         this.contigAlignments = null;
         this.secondsInAssembly = 0;
+        this.assemblyScore = 0.f;
+        this.readBases = 0;
     }
 
-    public AlignedAssemblyOrExcuse( final int assemblyId, final FermiLiteAssembly assembly, final int secondsInAssembly,
+    public AlignedAssemblyOrExcuse( final int assemblyId, final FermiLiteAssembly assembly,
+                                    final int secondsInAssembly, final float assemblyScore,
+                                    final int readBases,
                                     final List<List<BwaMemAlignment>> contigAlignments ) {
         Utils.validate(assembly.getNContigs()==contigAlignments.size(),
                 "Number of contigs in assembly doesn't match length of list of alignments.");
@@ -86,12 +94,16 @@ public final class AlignedAssemblyOrExcuse {
         this.assembly = assembly;
         this.contigAlignments = contigAlignments;
         this.secondsInAssembly = secondsInAssembly;
+        this.assemblyScore = assemblyScore;
+        this.readBases = readBases;
     }
 
     private AlignedAssemblyOrExcuse( final Kryo kryo, final Input input ) {
         this.assemblyId = input.readInt();
         this.errorMessage = input.readString();
         this.secondsInAssembly = input.readInt();
+        this.assemblyScore = input.readFloat();
+        this.readBases = input.readInt();
         if ( errorMessage != null ) {
             this.assembly = null;
             this.contigAlignments = null;
@@ -209,6 +221,8 @@ public final class AlignedAssemblyOrExcuse {
         output.writeInt(assemblyId);
         output.writeString(errorMessage);
         output.writeInt(secondsInAssembly);
+        output.writeFloat(assemblyScore);
+        output.writeInt(readBases);
         if ( errorMessage == null ) {
             final int nContigs = assembly.getNContigs();
             final Map<Contig, Integer> contigMap = new HashMap<>();
@@ -273,42 +287,83 @@ public final class AlignedAssemblyOrExcuse {
     /**
      * write a file describing each interval
      */
-    public static void writeIntervalFile( final String intervalFile,
-                                          final SAMFileHeader header,
-                                          final List<SVInterval> intervals,
-                                          final List<AlignedAssemblyOrExcuse> intervalDispositions ) {
-        Utils.validate(intervalFile != null && header != null && intervals != null && intervalDispositions != null,
+    public static void writeIntervalFile(final String intervalFile,
+                                         final SAMFileHeader header,
+                                         final List<SVInterval> intervals,
+                                         final List<AlignedAssemblyOrExcuse> intervalDispositions,
+                                         final SVIntervalTree<String> trueBreakpoints,
+                                         final SVIntervalTree<String> narlyBreakpoints ) {
+        Utils.validate(intervalFile != null && header != null &&
+                        intervals != null && intervalDispositions != null,
                 "At least one of the arguments is null.");
-
-        final Map<Integer, AlignedAssemblyOrExcuse> resultsMap = new HashMap<>();
-        intervalDispositions.forEach(alignedAssemblyOrExcuse ->
-                resultsMap.put(alignedAssemblyOrExcuse.getAssemblyId(), alignedAssemblyOrExcuse));
 
         try ( final OutputStreamWriter writer =
                       new OutputStreamWriter(new BufferedOutputStream(BucketUtils.createFile(intervalFile))) ) {
+            writer.write("asm#\trefTig\tstart\tend\tnTigs\tasmSecs\tN50\tpenalty\treadLen\ttigsLen\tstatus\n");
             final List<SAMSequenceRecord> contigs = header.getSequenceDictionary().getSequences();
             final int nIntervals = intervals.size();
             for ( int intervalIdx = 0; intervalIdx != nIntervals; ++intervalIdx ) {
+                // format common stuff at start of line
                 final SVInterval interval = intervals.get(intervalIdx);
                 Utils.nonNull(interval, "interval is null for " + intervalIdx);
-                final String seqName = contigs.get(interval.getContig()).getSequenceName();
-                final AlignedAssemblyOrExcuse alignedAssemblyOrExcuse = resultsMap.get(intervalIdx);
+                final String prefix =
+                        String.format("asm%05d\t%s\t%d\t%d\t", intervalIdx,
+                                contigs.get(interval.getContig()).getSequenceName(),
+                                interval.getStart(), interval.getEnd());
+
+                // format the variable material saying what happened in the assembly at the end of the line
+                final AlignedAssemblyOrExcuse alignedAssemblyOrExcuse = intervalDispositions.get(intervalIdx);
+                Utils.validate(alignedAssemblyOrExcuse != null &&
+                                        alignedAssemblyOrExcuse.getAssemblyId() == intervalIdx,
+                                "AlignedAssemblyOrExcuse list is incomplete or out of order.");
                 final String disposition;
-                if ( alignedAssemblyOrExcuse == null ) {
-                    disposition = "unknown";
-                } else if ( alignedAssemblyOrExcuse.getErrorMessage() != null ) {
-                    disposition = alignedAssemblyOrExcuse.getErrorMessage();
+                if ( alignedAssemblyOrExcuse.getErrorMessage() != null ) {
+                    disposition = "0\t0\t0\t0\t0\t0\t" + alignedAssemblyOrExcuse.getErrorMessage() + "\n";
                 } else {
-                    disposition = "produced " + alignedAssemblyOrExcuse.getAssembly().getNContigs() +
-                            " contigs in " + alignedAssemblyOrExcuse.getSecondsInAssembly() + " secs.";
+                    final int contigBases =
+                            alignedAssemblyOrExcuse.getAssembly().getContigs().stream()
+                                    .mapToInt(tig -> tig.getSequence().length).sum();
+
+                    final boolean isCalled = narlyBreakpoints.hasOverlapper(interval);
+                    final boolean isTrue = trueBreakpoints.hasOverlapper(interval);
+                    final String status = (isCalled == isTrue ? "T" : "F") + (isCalled ? "P" : "N");
+                    disposition =
+                            String.format("%d\t%d\t%d\t%.2f\t%d\t%d\t%s\n",
+                                            alignedAssemblyOrExcuse.getAssembly().getNContigs(),
+                                            alignedAssemblyOrExcuse.getSecondsInAssembly(),
+                                            computeN50(alignedAssemblyOrExcuse.getAssembly()),
+                                            alignedAssemblyOrExcuse.getAssemblyScore(),
+                                            alignedAssemblyOrExcuse.getReadBases(),
+                                            contigBases,
+                                            status);
                 }
-                writer.write(intervalIdx + "\t" +
-                        seqName + ":" + interval.getStart() + "-" + interval.getEnd() + "\t" +
-                        disposition + "\n");
+
+                writer.write(prefix + disposition);
             }
         } catch ( final IOException ioe ) {
             throw new UserException.CouldNotCreateOutputFile("Can't write intervals file " + intervalFile, ioe);
         }
+    }
+
+    //TODO: make this a method of FermiLiteAssembly
+    private static int computeN50( final FermiLiteAssembly assembly ) {
+        final List<Contig> contigs = assembly.getContigs();
+        final int nContigs = contigs.size();
+        if ( nContigs < 1 ) return 0;
+        if ( nContigs == 1 ) return contigs.get(0).getSequence().length;
+
+        final int[] lengths = new int[nContigs];
+        for ( int idx = 0; idx != nContigs; ++idx ) {
+            lengths[idx] = contigs.get(idx).getSequence().length;
+        }
+        Arrays.sort(lengths);
+        final int totalSize = Arrays.stream(lengths).sum();
+        int runningTotal = 0;
+        for ( int idx = nContigs - 1; idx >= 0; --idx ) {
+            runningTotal += 2 * lengths[idx];
+            if ( runningTotal >= totalSize ) return lengths[idx];
+        }
+        throw new GATKException("impossible situation -- sum of array greater than twice the sum of each element");
     }
 
     /**

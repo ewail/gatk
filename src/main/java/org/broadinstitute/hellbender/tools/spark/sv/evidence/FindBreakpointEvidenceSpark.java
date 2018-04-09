@@ -130,9 +130,11 @@ public final class FindBreakpointEvidenceSpark extends GATKSparkTool {
     @Override
     protected void runTool( final JavaSparkContext ctx ) {
 
-        gatherEvidenceAndWriteContigSamFile(ctx, params, getHeaderForReads(), getUnfilteredReads(),
-                outputAssemblyAlignments, logger);
+        final SAMFileHeader header = getHeaderForReads();
 
+        final AssembledEvidenceResults results =
+                gatherEvidenceAndWriteContigSamFile(ctx, params, header, getUnfilteredReads(),
+                                                        outputAssemblyAlignments, logger);
     }
 
     /**
@@ -185,11 +187,6 @@ public final class FindBreakpointEvidenceSpark extends GATKSparkTool {
                         params.includeMappingLocation, fermiLiteAssemblyHandler));
 
         alignedAssemblyOrExcuseList.sort(Comparator.comparingInt(AlignedAssemblyOrExcuse::getAssemblyId));
-
-        // record the intervals
-        if ( params.intervalFile != null ) {
-            AlignedAssemblyOrExcuse.writeIntervalFile(params.intervalFile, header, intervals, alignedAssemblyOrExcuseList);
-        }
 
         // write alignments of the assembled contigs
         if ( outputAssemblyAlignments != null ) {

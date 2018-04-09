@@ -57,7 +57,6 @@ public final class SimpleNovelAdjacencyInterpreter {
         final Logger toolLogger = svDiscoveryInputData.toolLogger;
         final Broadcast<SAMSequenceDictionary> referenceSequenceDictionaryBroadcast = svDiscoveryInputData.referenceSequenceDictionaryBroadcast;
         final DiscoverVariantsFromContigsAlignmentsSparkArgumentCollection discoverStageArgs = svDiscoveryInputData.discoverStageArgs;
-        final List<SVInterval> assembledIntervals = svDiscoveryInputData.assembledIntervals;
 
         final JavaRDD<SimpleNovelAdjacencyAndChimericAlignmentEvidence> simpleNovelAdjacencies =
                 assemblyContigs
@@ -80,7 +79,7 @@ public final class SimpleNovelAdjacencyInterpreter {
                         .map(noveltyAndEvidence ->
                                 new SimpleNovelAdjacencyAndChimericAlignmentEvidence(noveltyAndEvidence._1, noveltyAndEvidence._2));
 
-        SvDiscoveryUtils.evaluateIntervalsAndNarls(assembledIntervals,
+        SvDiscoveryUtils.evaluateIntervalsAndNarls(svDiscoveryInputData,
                 simpleNovelAdjacencies.map(SimpleNovelAdjacencyAndChimericAlignmentEvidence::getNovelAdjacencyReferenceLocations).collect(),
                 referenceSequenceDictionaryBroadcast.getValue(), discoverStageArgs, toolLogger);
 

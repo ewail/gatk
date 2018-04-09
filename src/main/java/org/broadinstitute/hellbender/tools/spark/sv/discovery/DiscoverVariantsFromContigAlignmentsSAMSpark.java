@@ -137,7 +137,7 @@ public final class DiscoverVariantsFromContigAlignmentsSAMSpark extends GATKSpar
         final SvDiscoveryInputData svDiscoveryInputData =
                 new SvDiscoveryInputData(ctx,
                         discoverStageArgs, prefixForOutput + "_" + SVUtils.getSampleId(getHeaderForReads()) + "_inv_del_ins.vcf",
-                        null, null, null,
+                        null, null, null, null,
                         cnvCallsBroadcast,
                         getReads(), getHeaderForReads(), getReference(), localLogger);
 
@@ -191,7 +191,7 @@ public final class DiscoverVariantsFromContigAlignmentsSAMSpark extends GATKSpar
 
 
         try {
-            SvDiscoveryUtils.evaluateIntervalsAndNarls(assembledIntervals, narlsAndSources.map(Tuple2::_1).collect(),
+            SvDiscoveryUtils.evaluateIntervalsAndNarls(svDiscoveryInputData, narlsAndSources.map(Tuple2::_1).collect(),
                     referenceSequenceDictionaryBroadcast.getValue(), discoverStageArgs, toolLogger);
 
             List<VariantContext> annotatedVariants =

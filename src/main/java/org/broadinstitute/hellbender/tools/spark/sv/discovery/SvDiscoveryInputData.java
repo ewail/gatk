@@ -9,6 +9,7 @@ import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.broadcast.Broadcast;
 import org.broadinstitute.hellbender.engine.datasources.ReferenceMultiSource;
 import org.broadinstitute.hellbender.tools.spark.sv.StructuralVariationDiscoveryPipelineSpark;
+import org.broadinstitute.hellbender.tools.spark.sv.evidence.AlignedAssemblyOrExcuse;
 import org.broadinstitute.hellbender.tools.spark.sv.evidence.EvidenceTargetLink;
 import org.broadinstitute.hellbender.tools.spark.sv.evidence.ReadMetadata;
 import org.broadinstitute.hellbender.tools.spark.sv.utils.*;
@@ -30,6 +31,8 @@ public final class SvDiscoveryInputData {
 
     public final Broadcast<SVIntervalTree<VariantContext>> cnvCallsBroadcast;
     public final List<SVInterval> assembledIntervals;
+    public final List<AlignedAssemblyOrExcuse> intervalAssemblies;
+
     public final PairedStrandedIntervalTree<EvidenceTargetLink> evidenceTargetLinks;
     public final ReadMetadata metadata;
 
@@ -44,6 +47,7 @@ public final class SvDiscoveryInputData {
                                 final String outputPath,
                                 final ReadMetadata metadata,
                                 final List<SVInterval> assembledIntervals,
+                                final List<AlignedAssemblyOrExcuse> intervalAssemblies,
                                 final PairedStrandedIntervalTree<EvidenceTargetLink> evidenceTargetLinks,
                                 final Broadcast<SVIntervalTree<VariantContext>> cnvCallsBroadcast,
                                 final JavaRDD<GATKRead> reads,
@@ -51,7 +55,7 @@ public final class SvDiscoveryInputData {
                                 final ReferenceMultiSource reference,
                                 final Logger toolLogger) {
 
-        this(SVUtils.getSampleId(headerForReads), discoverStageArgs, outputPath, metadata, assembledIntervals,
+        this(SVUtils.getSampleId(headerForReads), discoverStageArgs, outputPath, metadata, assembledIntervals, intervalAssemblies,
                 evidenceTargetLinks, reads, toolLogger,
                 ctx.broadcast(reference), ctx.broadcast(headerForReads.getSequenceDictionary()), ctx.broadcast(headerForReads),
                 cnvCallsBroadcast);
@@ -62,6 +66,7 @@ public final class SvDiscoveryInputData {
                                 final String outputPath,
                                 final ReadMetadata metadata,
                                 final List<SVInterval> assembledIntervals,
+                                final List<AlignedAssemblyOrExcuse> intervalAssemblies,
                                 final PairedStrandedIntervalTree<EvidenceTargetLink> evidenceTargetLinks,
                                 final JavaRDD<GATKRead> reads,
                                 final Logger toolLogger,
@@ -84,6 +89,7 @@ public final class SvDiscoveryInputData {
 
         this.cnvCallsBroadcast = cnvCallsBroadcast;
         this.assembledIntervals = assembledIntervals;
+        this.intervalAssemblies = intervalAssemblies;
         this.evidenceTargetLinks = evidenceTargetLinks;
         this.metadata = metadata;
 
