@@ -126,7 +126,9 @@ public final class FermiLiteAssemblyHandler implements FindBreakpointEvidenceSpa
                                              final boolean expandAssemblyGraph ) {
         final FermiLiteAssembly unshadowedAssembly =
                 removeShadowedContigs ? removeShadowedContigs(initialAssembly) : initialAssembly;
-        return expandAssemblyGraph ? expandAssemblyGraph(removeUnbranchedConnections(unshadowedAssembly)) : unshadowedAssembly;
+        final FermiLiteAssembly expandedAssembly =
+                expandAssemblyGraph ? expandAssemblyGraph(removeUnbranchedConnections(unshadowedAssembly)) : unshadowedAssembly;
+        return removeShadowedContigs ? removeShadowedContigs(expandedAssembly) : expandedAssembly;
     }
 
     /** Eliminate contigs from the assembly that vary from another contig by just a few SNVs. */

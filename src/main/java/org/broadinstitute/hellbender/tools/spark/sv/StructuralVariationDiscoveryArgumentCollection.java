@@ -104,6 +104,9 @@ public class StructuralVariationDiscoveryArgumentCollection implements Serializa
         @Argument(doc = "Adapter sequence.", fullName = "adapter-sequence", optional = true)
         public String adapterSequence;
 
+        @Advanced @Argument(doc = "ZDropoff (see Bwa mem manual) for contig alignment.", fullName = "zdropoff")
+        public int zDropoff = 20;
+
         // ---------- options -----------
 
         @Argument(doc = "Write GFA representation of assemblies in fastq-dir.", fullName = "write-gfas")

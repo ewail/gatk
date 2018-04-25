@@ -325,13 +325,16 @@ public final class AlignedAssemblyOrExcuse {
                                     .mapToInt(tig -> tig.getSequence().length).sum();
 
                     final boolean isCalled = narlyBreakpoints.hasOverlapper(interval);
-                    final boolean isTrue = trueBreakpoints.hasOverlapper(interval);
-                    final String status = (isCalled == isTrue ? "T" : "F") + (isCalled ? "P" : "N");
+                    String status = isCalled ? "P" : "N";
+                    if ( trueBreakpoints != null ) {
+                        final boolean isTrue = trueBreakpoints.hasOverlapper(interval);
+                        status = (isCalled == isTrue ? "T" : "F") + status;
+                    }
                     disposition =
                             String.format("%d\t%d\t%d\t%.2f\t%d\t%d\t%s\n",
                                             alignedAssemblyOrExcuse.getAssembly().getNContigs(),
                                             alignedAssemblyOrExcuse.getSecondsInAssembly(),
-                                            computeN50(alignedAssemblyOrExcuse.getAssembly()),
+                                            alignedAssemblyOrExcuse.getAssembly().computeN50(),
                                             alignedAssemblyOrExcuse.getAssemblyScore(),
                                             alignedAssemblyOrExcuse.getReadBases(),
                                             contigBases,
@@ -343,27 +346,6 @@ public final class AlignedAssemblyOrExcuse {
         } catch ( final IOException ioe ) {
             throw new UserException.CouldNotCreateOutputFile("Can't write intervals file " + intervalFile, ioe);
         }
-    }
-
-    //TODO: make this a method of FermiLiteAssembly
-    private static int computeN50( final FermiLiteAssembly assembly ) {
-        final List<Contig> contigs = assembly.getContigs();
-        final int nContigs = contigs.size();
-        if ( nContigs < 1 ) return 0;
-        if ( nContigs == 1 ) return contigs.get(0).getSequence().length;
-
-        final int[] lengths = new int[nContigs];
-        for ( int idx = 0; idx != nContigs; ++idx ) {
-            lengths[idx] = contigs.get(idx).getSequence().length;
-        }
-        Arrays.sort(lengths);
-        final int totalSize = Arrays.stream(lengths).sum();
-        int runningTotal = 0;
-        for ( int idx = nContigs - 1; idx >= 0; --idx ) {
-            runningTotal += 2 * lengths[idx];
-            if ( runningTotal >= totalSize ) return lengths[idx];
-        }
-        throw new GATKException("impossible situation -- sum of array greater than twice the sum of each element");
     }
 
     /**

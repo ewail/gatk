@@ -34,12 +34,22 @@ public class SvDiscoveryUtils {
                                                  final SAMSequenceDictionary referenceSequenceDictionary,
                                                  final DiscoverVariantsFromContigsAlignmentsSparkArgumentCollection parameters,
                                                  final Logger toolLogger) {
-        if ( parameters.truthVCF != null ) {
+        final SVIntervalTree<String> narlyBreakpoints =
+                readBreakpointsFromNarls(narls, referenceSequenceDictionary, parameters.truthIntervalPadding);
+
+        if ( parameters.truthVCF == null ) {
+            if ( parameters.intervalFile != null && inputData.intervalAssemblies != null ) {
+                AlignedAssemblyOrExcuse.writeIntervalFile(
+                        parameters.intervalFile,
+                        inputData.headerBroadcast.getValue(),
+                        inputData.assembledIntervals,
+                        inputData.intervalAssemblies,
+                        null,
+                        narlyBreakpoints );
+            }
+        } else {
             final SVIntervalTree<String> trueBreakpoints =
                     SVVCFReader.readBreakpointsFromTruthVCF(parameters.truthVCF, referenceSequenceDictionary, parameters.truthIntervalPadding);
-
-            final SVIntervalTree<String> narlyBreakpoints =
-                    readBreakpointsFromNarls(narls, referenceSequenceDictionary, parameters.truthIntervalPadding);
 
             if ( inputData.assembledIntervals != null ) {
                 evaluateIntervalsAgainstTruth(inputData.assembledIntervals, trueBreakpoints, toolLogger);
