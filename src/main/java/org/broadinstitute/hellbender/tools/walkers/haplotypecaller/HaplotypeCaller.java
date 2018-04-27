@@ -6,7 +6,6 @@ import htsjdk.variant.variantcontext.writer.VariantContextWriter;
 import java.nio.file.Path;
 import org.broadinstitute.barclay.argparser.Argument;
 import org.broadinstitute.barclay.argparser.ArgumentCollection;
-import org.broadinstitute.barclay.argparser.BetaFeature;
 import org.broadinstitute.barclay.argparser.CommandLineProgramProperties;
 import org.broadinstitute.barclay.help.DocumentedFeature;
 import org.broadinstitute.hellbender.cmdline.StandardArgumentDefinitions;
@@ -17,13 +16,10 @@ import org.broadinstitute.hellbender.engine.filters.ReadFilter;
 import org.broadinstitute.hellbender.exceptions.UserException;
 import org.broadinstitute.hellbender.tools.walkers.annotator.*;
 import org.broadinstitute.hellbender.utils.fasta.CachingIndexedFastaSequenceFile;
-import org.broadinstitute.hellbender.utils.SimpleInterval;
 
-import java.io.File;
 import java.io.FileNotFoundException;
 import java.util.*;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+
 import org.broadinstitute.hellbender.utils.io.IOUtils;
 
 
@@ -193,28 +189,21 @@ public final class HaplotypeCaller extends AssemblyRegionWalker {
     public List<Class<? extends Annotation>> getDefaultAnnotationGroups() { return Arrays.asList(StandardAnnotation.class, StandardHCAnnotation.class);}
 
     @Override
-    public boolean useAnnotationArguments() { return true;}
+    public boolean useVariantAnnotations() { return true;}
 
     /**
-     * If we are in GVCF mode we want to tailor the annotations as there are certain annotations in the standard
+     * If we are in reference confidence mode we want to tailor the annotations as there are certain annotations in the standard
      * haplotype caller set which are no longer relevant, thus we filter them out before constructing the
      * VariantAnnotationEngine because the user args will have been parsed by that point.
      *
-     * @see GATKTool#getAnnotationsToUse()
+     * @see GATKTool#makeAnnotationCollection()
      * @return a collection of annotation arguments with alterations depending on hcArgs.emitReferenceConfidence
      */
     @Override
-    public Collection<Annotation> getAnnotationsToUse() {
+    public Collection<Annotation> makeAnnotationCollection() {
         final boolean confidenceMode = hcArgs.emitReferenceConfidence != ReferenceConfidenceMode.NONE;
-        final Collection<Annotation> annotations = super.getAnnotationsToUse();
-        return Stream.concat(annotations.stream(),
-                (!annotations.contains(new StrandBiasBySample()) && confidenceMode ? Arrays.asList(new StrandBiasBySample()) : new ArrayList<Annotation>()).stream())
-                .filter(c -> !((confidenceMode)
-                        && (c.getClass() == (ChromosomeCounts.class) ||
-                            c.getClass() == (FisherStrand.class) ||
-                            c.getClass() == (StrandOddsRatio.class) ||
-                            c.getClass() == (QualByDepth.class)))
-                ).collect(Collectors.toList());
+        final Collection<Annotation> annotations = super.makeAnnotationCollection();
+        return confidenceMode? HaplotypeCallerEngine.filterReferenceConfidenceAnnotations(annotations): annotations;
     }
 
     @Override
@@ -225,7 +214,7 @@ public final class HaplotypeCaller extends AssemblyRegionWalker {
     @Override
     public void onTraversalStart() {
         final ReferenceSequenceFile referenceReader = getReferenceReader(referenceArguments);
-        final VariantAnnotatorEngine variantAnnotatorEngine = new VariantAnnotatorEngine(getAnnotationsToUse(),
+        final VariantAnnotatorEngine variantAnnotatorEngine = new VariantAnnotatorEngine(makeAnnotationCollection(),
                 hcArgs.dbsnp.dbsnp, hcArgs.comps,  hcArgs.emitReferenceConfidence != ReferenceConfidenceMode.NONE);
         hcEngine = new HaplotypeCallerEngine(hcArgs, createOutputBamIndex, createOutputBamMD5, getHeaderForReads(), referenceReader, variantAnnotatorEngine);
 

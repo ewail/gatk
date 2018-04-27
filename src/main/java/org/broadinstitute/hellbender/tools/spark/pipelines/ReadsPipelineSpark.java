@@ -142,7 +142,7 @@ public class ReadsPipelineSpark extends GATKSparkTool {
     }
 
     @Override
-    public boolean useAnnotationArguments() { return true;}
+    public boolean useVariantAnnotations() { return true;}
 
     @Override
     protected void runTool(final JavaSparkContext ctx) {
