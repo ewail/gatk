@@ -4,6 +4,8 @@ import h5py
 import numpy as np
 from collections import Counter, defaultdict, namedtuple
 
+from gatktool import tool
+
 # Keras Imports
 import keras.backend as K
 
@@ -43,8 +45,10 @@ def score_and_write_batch(args, model, file_out, fifo, batch_size, python_batch_
     variant_data = []
     read_batch = []
 
+    print("Args:")
     for _ in range(batch_size):
-        fifo_line = fifo.readline()
+        #fifo arg to this function is unused now
+        fifo_line = tool.readDataFIFO()
         fifo_data = fifo_line.split(defines.SEPARATOR_CHAR)
 
         variant_data.append(fifo_data[0] + '\t' + fifo_data[1] + '\t' + fifo_data[2] + '\t' + fifo_data[3])

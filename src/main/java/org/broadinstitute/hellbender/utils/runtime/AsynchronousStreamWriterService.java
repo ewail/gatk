@@ -66,7 +66,7 @@ public class AsynchronousStreamWriterService<T> {
                     T element = batchList.get(i);
                     itemSerializer.apply(element).writeTo(streamWriter);
                 }
-                // this can block, waiting for the stream to be consumed if its buffered
+                // this can block, waiting for the stream to be consumed
                 streamWriter.flush();
                 return batchSize; // return the number of items this batch was asked to write
             } catch (IOException e) {
@@ -75,6 +75,33 @@ public class AsynchronousStreamWriterService<T> {
         });
     }
 
+    /**
+     * Waits for a batch that was previously initiated via {@link #startAsynchronousBatchWrite(List)}}
+     * to complete, flushes the target stream and returns the corresponding completed Future. The Future representing
+     * a given batch can only be obtained via this method once. If no work is outstanding, and/or the previous batch
+     * has already been retrieved, null is returned.
+     * @return returns null if no previous work to complete, otherwise a completed Future
+     */
+    //TODO: is this Future useful to return ? ?
+    public Future<Integer> waitForPreviousBatchCompletion() {
+        final Future<Integer> lastCompleteBatch = previousBatch;
+         if (previousBatch != null) {
+            try {
+                try {
+                    previousBatch.get();
+                } catch (ExecutionException | InterruptedException e) {
+                    throw new GATKException("Interrupted during background stream write", e);
+                }
+                streamWriter.flush();
+            } catch (IOException e) {
+                throw new GATKException("IOException waiting for asynchrnous batch completion", e);
+            }
+            previousBatch = null;
+        }
+        return lastCompleteBatch;
+    }
+
+    //TODO obsolete!
     /**
      * Waits for a batch that was previously initiated via {@link #startAsynchronousBatchWrite(List)}}
      * to complete, flushes the target stream and returns the corresponding completed Future. The Future representing

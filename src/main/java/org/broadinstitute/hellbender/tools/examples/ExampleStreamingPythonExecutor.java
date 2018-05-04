@@ -7,8 +7,7 @@ import org.broadinstitute.hellbender.cmdline.programgroups.ExampleProgramGroup;
 import org.broadinstitute.hellbender.engine.FeatureContext;
 import org.broadinstitute.hellbender.engine.ReadWalker;
 import org.broadinstitute.hellbender.engine.ReferenceContext;
-import org.broadinstitute.hellbender.exceptions.GATKException;
-import org.broadinstitute.hellbender.utils.python.StreamingPythonScriptExecutor;
+import org.broadinstitute.hellbender.utils.python.CooperativePythonScriptExecutor;
 import org.broadinstitute.hellbender.utils.read.GATKRead;
 import org.broadinstitute.hellbender.utils.runtime.AsynchronousStreamWriterService;
 
@@ -16,7 +15,6 @@ import java.io.*;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Example ReadWalker program that uses a Python streaming executor to stream summary data from a BAM
@@ -55,10 +53,9 @@ public class ExampleStreamingPythonExecutor extends ReadWalker {
 
     // Create the Python executor. This doesn't actually start the Python process, but verifies that
     // the requested Python executable exists and can be located.
-    final StreamingPythonScriptExecutor pythonExecutor = new StreamingPythonScriptExecutor(true);
+    final CooperativePythonScriptExecutor pythonExecutor = new CooperativePythonScriptExecutor(true);
 
-    private FileOutputStream fifoWriter;
-    private AsynchronousStreamWriterService<String> asyncWriter = null;
+    private AsynchronousStreamWriterService<String> asyncStreamWriter = null;
     private List<String> batchList = new ArrayList<>(batchSize);
     private int batchCount = 0;
 
@@ -67,22 +64,8 @@ public class ExampleStreamingPythonExecutor extends ReadWalker {
 
         // Start the Python process, and get a FIFO from the executor to use to send data to Python. The lifetime
         // of the FIFO is managed by the executor; the FIFO will be destroyed when the executor is terminated.
-        pythonExecutor.start(Collections.emptyList());
-        final File fifoFile = pythonExecutor.getFIFOForWrite();
-
-        // Open the FIFO for writing. Opening a FIFO for read or write will block until there is reader/writer
-        // on the other end, so before we open it, send an ASYNCHRONOUS command, that doesn't wait for a
-        // response, to the Python process to open the FIFO for reading. The Python process will then block until
-        // we open the FIFO.
-        pythonExecutor.sendAsynchronousCommand(String.format("fifoFile = open('%s', 'r')" + NL, fifoFile.getAbsolutePath()));
-        try {
-            fifoWriter = new FileOutputStream(fifoFile);
-            asyncWriter = pythonExecutor.getAsynchronousStreamWriterService(fifoWriter, AsynchronousStreamWriterService.stringSerializer);
-        } catch ( IOException e ) {
-            throw new GATKException("Failure opening FIFO for writing", e);
-        }
-        // synchronize on the output prompt before executing the next statement
-        pythonExecutor.getAccumulatedOutput();
+        pythonExecutor.start(Collections.emptyList(), true);
+        asyncStreamWriter = pythonExecutor.initStreamWriter(AsynchronousStreamWriterService.stringSerializer);
 
         // Also, ask Python to open our output file, where it will write the contents of everything it reads
         // from the FIFO. <code sendSynchronousCommand/>
@@ -94,7 +77,8 @@ public class ExampleStreamingPythonExecutor extends ReadWalker {
         // Extract data from the read and accumulate, unless we've reached a batch size, in which case we
         // kick off an asynchronous batch.
         if (batchCount == batchSize) {
-            startAsynchronousBatchWrite();
+            waitForPreviousBatch(); // wait for the last batch of there is one
+            startNextBatch();
         }
         batchList.add(String.format(
                 "Read at %s:%d-%d:\n%s\n",
@@ -107,48 +91,48 @@ public class ExampleStreamingPythonExecutor extends ReadWalker {
      * @return Success indicator.
      */
     public Object onTraversalSuccess() {
+        waitForPreviousBatch(); // wait for the previous batch, if there is one
         if (batchCount != 0) {
-            // we have accumulated reads that haven't been dispatched;, so dispatch the last batch
-            startAsynchronousBatchWrite();
+            // We have accumulated reads that haven't been dispatched;, so dispatch the last batch,
+            // and then wait for it to complete
+            startNextBatch();
+            waitForPreviousBatch();
         }
-        // make sure the final batch has completed
-        asyncWriter.waitForPreviousBatchCompletion(1000, TimeUnit.MILLISECONDS);
-
-        // synchronize on the output prompt before executing the next statement
-        pythonExecutor.getAccumulatedOutput();
-
-        // Send synchronous commands to Python to close the temp file and the FIFO file
-        // Terminate the async writer and Python executor in closeTool, since this always gets called.
-        pythonExecutor.sendSynchronousCommand("tempFile.close()" + NL);
-        pythonExecutor.sendSynchronousCommand("fifoFile.close()" + NL);
 
         return true;
     }
 
-    private void startAsynchronousBatchWrite() {
-        // Before we hand off a new batch, wait for the previous batch to complete.
-        asyncWriter.waitForPreviousBatchCompletion(1000, TimeUnit.MILLISECONDS);
-
+    private void startNextBatch() {
         // Send an ASYNCHRONOUS command to Python to tell it to start consuming the lines about to be written
         // to the FIFO. Sending a *SYNCHRONOUS* command here would immediately block the background thread
         // since this statement will be executed BEFORE any data from the batch is written to the stream.
-        pythonExecutor.sendAsynchronousCommand(String.format(
-                "for i in range(%s):\n    tempFile.write(fifoFile.readline())" + NL + NL, batchCount));
-        asyncWriter.startAsynchronousBatchWrite(batchList);
+        pythonExecutor.sendAsynchronousCommand(
+                String.format("for i in range(%s):\n    tempFile.write(tool.readDataFIFO())" + NL + NL, batchCount)
+        );
+        asyncStreamWriter.startAsynchronousBatchWrite(batchList);
         batchList = new ArrayList<>(batchSize);
         batchCount = 0;
     }
 
+    private void waitForPreviousBatch() {
+        if (asyncStreamWriter.waitForPreviousBatchCompletion() != null) {
+            // Wait for the previous batch to be processed.
+            pythonExecutor.waitForAck(); // block waiting for the ack..
+        }
+    }
+
     @Override
     public void closeTool() {
-        if (asyncWriter != null) {
-            asyncWriter.terminate();
+        // Terminate the async writer and Python executor in closeTool, since this always gets called.
+        if (asyncStreamWriter != null) {
+            asyncStreamWriter.terminate();
         }
-        try {
-            fifoWriter.close();
-        } catch (IOException e) {
-            throw new GATKException("IOException closing fifo writer", e);
-        }
+
+        // Send a synchronous command to Python to close the temp file
+        pythonExecutor.sendSynchronousCommand("tempFile.close()" + NL);
+
+        // terminate the async writer and fifo
+        pythonExecutor.terminateAsyncWriterForFifo();
         pythonExecutor.terminate();
     }
 }
